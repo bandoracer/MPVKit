@@ -2,6 +2,14 @@ diff --git a/audio/out/ao_avfoundation.m b/audio/out/ao_avfoundation.m
 index c13f601..3afc596 100644
 --- a/audio/out/ao_avfoundation.m
 +++ b/audio/out/ao_avfoundation.m
+@@ -23,6 +23,7 @@
+ #include "common/msg.h"
+ #include "internal.h"
+ #include "osdep/timer.h"
++#include "options/m_option.h"
+ #include "ta/ta_talloc.h"
+ 
+ #import <AVFoundation/AVFoundation.h>
 @@ -45,6 +45,7 @@ struct priv {
      CMAudioFormatDescriptionRef format_description;
      AVObserver *observer;
