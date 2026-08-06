@@ -1,0 +1,101 @@
+diff --git a/audio/out/ao_avfoundation.m b/audio/out/ao_avfoundation.m
+index c13f601..3afc596 100644
+--- a/audio/out/ao_avfoundation.m
++++ b/audio/out/ao_avfoundation.m
+@@ -45,6 +45,7 @@ struct priv {
+     CMAudioFormatDescriptionRef format_description;
+     AVObserver *observer;
+     int64_t end_time_av;
++    bool host_managed_audio_session;
+ };
+ 
+ static int64_t CMTimeGetNanoseconds(CMTime time)
+@@ -206,10 +207,18 @@ static int control(struct ao *ao, enum aocontrol cmd, void *arg)
+     return self;
+ }
+ - (void)handleRestartNotification:(NSNotification*)notification {
+-    // Use NSString -UTF8String (portable) instead of cfstr_get_cstr, whose
+-    // implementation (osdep/utils-mac.c) is only built on macOS (Cocoa).
+-    MP_WARN(ao, "restarting due to system notification; this will cause desync\n");
++    struct priv *p = ao->priv;
+     MP_VERBOSE(ao, "notification name: %s\n", notification.name.UTF8String);
++    if (p->host_managed_audio_session) {
++        // The embedding application owns the process-wide AVAudioSession and
++        // route generation. Ask mpv's player core to recreate the AO at its
++        // normal synchronized boundary; directly flushing and restarting this
++        // renderer leaves the audio clock detached from the video timeline.
++        MP_VERBOSE(ao, "requesting synchronized audio-output reload\n");
++        ao_request_reload(ao);
++        return;
++    }
++    MP_WARN(ao, "restarting due to system notification; this will cause desync\n");
+     stop(ao);
+     start(ao);
+ }
+@@ -221,13 +230,15 @@ static int init(struct ao *ao)
+     AudioChannelLayout *layout = NULL;
+ 
+ #if TARGET_OS_IPHONE
+-    AVAudioSession *instance = AVAudioSession.sharedInstance;
+-    NSInteger maxChannels = instance.maximumOutputNumberOfChannels;
+-    NSInteger prefChannels = MIN(maxChannels, ao->channels.num);
+-    [instance setCategory:AVAudioSessionCategoryPlayback error:nil];
+-    [instance setMode:AVAudioSessionModeMoviePlayback error:nil];
+-    [instance setActive:YES error:nil];
+-    [instance setPreferredOutputNumberOfChannels:prefChannels error:nil];
++    if (!p->host_managed_audio_session) {
++        AVAudioSession *instance = AVAudioSession.sharedInstance;
++        NSInteger maxChannels = instance.maximumOutputNumberOfChannels;
++        NSInteger prefChannels = MIN(maxChannels, ao->channels.num);
++        [instance setCategory:AVAudioSessionCategoryPlayback error:nil];
++        [instance setMode:AVAudioSessionModeMoviePlayback error:nil];
++        [instance setActive:YES error:nil];
++        [instance setPreferredOutputNumberOfChannels:prefChannels error:nil];
++    }
+ #endif
+ 
+     if ((p->renderer = [[AVSampleBufferAudioRenderer alloc] init]) == nil) {
+@@ -323,10 +334,12 @@ error:
+     if (p->format_description) CFRelease(p->format_description);
+ 
+ #if TARGET_OS_IPHONE
+-    [AVAudioSession.sharedInstance setActive:NO
+-        withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+-        error:nil
+-    ];
++    if (!p->host_managed_audio_session) {
++        [AVAudioSession.sharedInstance setActive:NO
++            withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
++            error:nil
++        ];
++    }
+ #endif
+ 
+     return CONTROL_ERROR;
+@@ -347,10 +360,12 @@ static void uninit(struct ao *ao)
+     [p->observer release];
+ 
+ #if TARGET_OS_IPHONE
+-    [AVAudioSession.sharedInstance setActive:NO
+-        withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
+-        error:nil
+-    ];
++    if (!p->host_managed_audio_session) {
++        [AVAudioSession.sharedInstance setActive:NO
++            withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
++            error:nil
++        ];
++    }
+ #endif
+ }
+ 
+@@ -369,4 +384,9 @@ const struct ao_driver audio_out_avfoundation = {
+     .list_devs      = ca_get_device_list,
+ #endif
+     .priv_size      = sizeof(struct priv),
++    .options = (const struct m_option[]){
++        {"host-managed-audio-session", OPT_BOOL(host_managed_audio_session)},
++        {0}
++    },
++    .options_prefix = "avfoundation",
+ };
