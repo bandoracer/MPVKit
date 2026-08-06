@@ -150,7 +150,7 @@ enum Library: String, CaseIterable {
             return [
                 .target(
                     name: "Libmpv",
-                    url: "https://github.com/mpvkit/MPVKit/releases/download/\(BaseBuild.options.releaseVersion)/Libmpv.xcframework.zip",
+                    url: "https://github.com/bandoracer/MPVKit/releases/download/\(BaseBuild.options.releaseVersion)/Libmpv.xcframework.zip",
                     checksum: ""
                 ),
             ]
