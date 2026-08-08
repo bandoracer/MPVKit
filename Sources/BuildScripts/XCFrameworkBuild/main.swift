@@ -675,7 +675,7 @@ private class BuildFFMPEG: BaseBuild {
         "--disable-muxers",
         "--enable-muxer=flac", "--enable-muxer=dash", "--enable-muxer=hevc",
         "--enable-muxer=m4v", "--enable-muxer=matroska", "--enable-muxer=mov", "--enable-muxer=mp4",
-        "--enable-muxer=mpegts", "--enable-muxer=webm*",
+        "--enable-muxer=mpegts", "--enable-muxer=spdif", "--enable-muxer=webm*",
         // ./configure --list-encoders
         "--disable-encoders",
         "--enable-encoder=aac", "--enable-encoder=alac", "--enable-encoder=flac", "--enable-encoder=pcm*",

@@ -10,6 +10,14 @@
 
 It includes scripts to build `mpv` native libraries.
 
+The `1.0.0-marquee.2` fork adds two opt-in AVFoundation contracts while
+retaining upstream behavior by default. Embedders may use
+`avfoundation-host-managed-audio-session=yes` to keep process-wide Apple audio
+session ownership in the host, and may combine
+`avfoundation-compressed-eac3=yes` with `audio-spdif=eac3` to deliver E-AC-3
+access units to MPV's existing `AVSampleBufferAudioRenderer` clock. The latter
+accepts only E-AC-3 and fails closed for every other compressed format.
+
 Forked from [kingslay/FFmpegKit](https://github.com/kingslay/FFmpegKit)
 
 ## About Metal support

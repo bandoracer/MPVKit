@@ -1,0 +1,601 @@
+diff --git a/audio/out/ao_avfoundation.m b/audio/out/ao_avfoundation.m
+index 9f9bad4..c779eb9 100644
+--- a/audio/out/ao_avfoundation.m
++++ b/audio/out/ao_avfoundation.m
+@@ -27,6 +27,7 @@
+ #include "ta/ta_talloc.h"
+
+ #import <AVFoundation/AVFoundation.h>
++#import <AudioToolbox/AudioToolbox.h>
+ #import <Foundation/Foundation.h>
+ #import <CoreAudioTypes/CoreAudioTypes.h>
+ #import <CoreFoundation/CoreFoundation.h>
+@@ -47,8 +48,25 @@ struct priv {
+     AVObserver *observer;
+     int64_t end_time_av;
+     bool host_managed_audio_session;
++    bool compressed_eac3_enabled;
++    bool compressed_eac3;
++    AudioFileStreamID compressed_parser;
++    uint8_t *spdif_buffer;
++    size_t spdif_buffer_size;
++    size_t spdif_buffer_capacity;
++    uint8_t *first_eac3_packet;
++    size_t first_eac3_packet_size;
++    bool compressed_discontinuity;
++    bool compressed_time_initialized;
++    bool compressed_failed;
++    uint64_t compressed_burst_count;
++    uint64_t compressed_packet_count;
+ };
+
++#define IEC61937_EAC3_BURST_BYTES 24576
++#define IEC61937_HEADER_BYTES 8
++#define IEC61937_EAC3_DATA_TYPE 0x15
++
+ static int64_t CMTimeGetNanoseconds(CMTime time)
+ {
+     time = CMTimeConvertScale(time, 1000000000, kCMTimeRoundingMethod_Default);
+@@ -60,6 +78,397 @@ static CMTime CMTimeFromNanoseconds(int64_t time)
+     return CMTimeMake(time, 1000000000);
+ }
+
++static uint16_t read_le16(const uint8_t *data)
++{
++    return data[0] | data[1] << 8;
++}
++
++static void compressed_fail(struct ao *ao, const char *message, OSStatus status)
++{
++    struct priv *p = ao->priv;
++
++    if (!p->compressed_failed) {
++        MP_FATAL(ao, "%s\n", message);
++        if (status)
++            MP_VERBOSE(ao, "Apple audio status: %d\n", status);
++    }
++    p->compressed_failed = true;
++}
++
++static bool prepare_compressed_format(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    AudioStreamBasicDescription asbd = {0};
++    UInt32 asbd_size = sizeof(asbd);
++    OSStatus err = AudioFileStreamGetProperty(
++        p->compressed_parser,
++        kAudioFileStreamProperty_DataFormat,
++        &asbd_size,
++        &asbd
++    );
++    if (err != noErr || asbd.mFormatID != kAudioFormatEnhancedAC3 ||
++        !asbd.mFramesPerPacket || !asbd.mSampleRate)
++    {
++        compressed_fail(ao, "invalid compressed E-AC-3 format", err);
++        return false;
++    }
++
++    UInt32 layout_size = 0;
++    Boolean writable = false;
++    AudioChannelLayout *layout = NULL;
++    err = AudioFileStreamGetPropertyInfo(
++        p->compressed_parser,
++        kAudioFileStreamProperty_ChannelLayout,
++        &layout_size,
++        &writable
++    );
++    if (err == noErr && layout_size) {
++        layout = talloc_size(NULL, layout_size);
++        if (!layout) {
++            compressed_fail(ao, "failed to allocate E-AC-3 channel layout", 0);
++            return false;
++        }
++        err = AudioFileStreamGetProperty(
++            p->compressed_parser,
++            kAudioFileStreamProperty_ChannelLayout,
++            &layout_size,
++            layout
++        );
++        if (err != noErr) {
++            talloc_free(layout);
++            layout = NULL;
++            layout_size = 0;
++        }
++    } else {
++        layout_size = 0;
++    }
++
++    UInt32 cookie_size = 0;
++    uint8_t *cookie = NULL;
++    err = AudioFileStreamGetPropertyInfo(
++        p->compressed_parser,
++        kAudioFileStreamProperty_MagicCookieData,
++        &cookie_size,
++        &writable
++    );
++    if (err == noErr && cookie_size) {
++        cookie = talloc_size(NULL, cookie_size);
++        if (!cookie) {
++            talloc_free(layout);
++            compressed_fail(ao, "failed to allocate E-AC-3 magic cookie", 0);
++            return false;
++        }
++        err = AudioFileStreamGetProperty(
++            p->compressed_parser,
++            kAudioFileStreamProperty_MagicCookieData,
++            &cookie_size,
++            cookie
++        );
++    }
++    if (err != noErr || !cookie || !cookie_size) {
++        talloc_free(layout);
++        talloc_free(cookie);
++        compressed_fail(ao, "compressed E-AC-3 magic cookie unavailable", err);
++        return false;
++    }
++
++    err = CMAudioFormatDescriptionCreate(
++        NULL,
++        &asbd,
++        layout_size,
++        layout,
++        cookie_size,
++        cookie,
++        NULL,
++        &p->format_description
++    );
++    talloc_free(layout);
++    talloc_free(cookie);
++    if (err != noErr) {
++        compressed_fail(ao, "failed to create compressed E-AC-3 format description", err);
++        return false;
++    }
++
++    MP_INFO(ao, "compressed E-AC-3 renderer prepared: %.0f Hz, %u channels, "
++            "%u frames per packet, %u-byte magic cookie\n",
++            asbd.mSampleRate, asbd.mChannelsPerFrame,
++            asbd.mFramesPerPacket, cookie_size);
++    return true;
++}
++
++static void compressed_property_listener(
++    void *opaque,
++    AudioFileStreamID stream,
++    AudioFileStreamPropertyID property,
++    AudioFileStreamPropertyFlags *flags
++)
++{
++    (void)opaque;
++    (void)stream;
++    (void)property;
++    (void)flags;
++    // AudioFileStream invokes packet delivery synchronously from ParseBytes.
++    // Format preparation is deferred to that callback so every required
++    // property, including the dec3 magic cookie and channel layout, is ready.
++}
++
++static void compressed_packets_listener(
++    void *opaque,
++    UInt32 byte_count,
++    UInt32 packet_count,
++    const void *input_data,
++    AudioStreamPacketDescription *descriptions
++)
++{
++    struct ao *ao = opaque;
++    struct priv *p = ao->priv;
++    CMBlockBufferRef block_buffer = NULL;
++    CMSampleBufferRef sample_buffer = NULL;
++    void *compact_data = NULL;
++    size_t *sample_sizes = NULL;
++
++    if (p->compressed_failed || !packet_count || !descriptions)
++        goto error;
++
++    if (!p->format_description && !prepare_compressed_format(ao))
++        goto error;
++
++    const AudioStreamBasicDescription *asbd =
++        CMAudioFormatDescriptionGetStreamBasicDescription(p->format_description);
++    if (!asbd || !asbd->mFramesPerPacket || !asbd->mSampleRate)
++        goto error;
++
++    sample_sizes = talloc_array(NULL, size_t, packet_count);
++    size_t compact_size = 0;
++    for (UInt32 n = 0; n < packet_count; n++) {
++        int64_t offset = descriptions[n].mStartOffset;
++        UInt32 size = descriptions[n].mDataByteSize;
++        if (offset < 0 || size > byte_count || (uint64_t)offset + size > byte_count ||
++            SIZE_MAX - compact_size < size)
++            goto error;
++        sample_sizes[n] = size;
++        compact_size += size;
++    }
++    if (!compact_size)
++        goto error;
++
++    compact_data = CFAllocatorAllocate(NULL, compact_size, 0);
++    if (!compact_data)
++        goto error;
++    size_t compact_offset = 0;
++    for (UInt32 n = 0; n < packet_count; n++) {
++        memcpy((uint8_t *)compact_data + compact_offset,
++               (const uint8_t *)input_data + descriptions[n].mStartOffset,
++               sample_sizes[n]);
++        compact_offset += sample_sizes[n];
++    }
++
++    OSStatus err = CMBlockBufferCreateWithMemoryBlock(
++        NULL,
++        compact_data,
++        compact_size,
++        kCFAllocatorDefault,
++        NULL,
++        0,
++        compact_size,
++        0,
++        &block_buffer
++    );
++    if (err != noErr)
++        goto apple_error;
++    compact_data = NULL;
++
++    CMSampleTimingInfo timing = {
++        .duration = CMTimeMake((int64_t)asbd->mFramesPerPacket,
++                               (int32_t)asbd->mSampleRate),
++        .presentationTimeStamp = CMTimeFromNanoseconds(p->end_time_av),
++        .decodeTimeStamp = kCMTimeInvalid,
++    };
++    err = CMSampleBufferCreateReady(
++        NULL,
++        block_buffer,
++        p->format_description,
++        packet_count,
++        1,
++        &timing,
++        packet_count,
++        sample_sizes,
++        &sample_buffer
++    );
++    if (err != noErr)
++        goto apple_error;
++
++    [p->renderer enqueueSampleBuffer:sample_buffer];
++    if (p->renderer.status == AVQueuedSampleBufferRenderingStatusFailed) {
++        MP_FATAL(ao, "compressed E-AC-3 renderer rejected sample buffers: %s\n",
++                 p->renderer.error.localizedDescription.UTF8String);
++        goto error;
++    }
++
++    int64_t packet_duration = CMTimeGetNanoseconds(timing.duration);
++    p->end_time_av += packet_duration * packet_count;
++    p->compressed_packet_count += packet_count;
++    goto finish;
++
++apple_error:
++    compressed_fail(ao, "failed to create compressed E-AC-3 sample buffer", err);
++    goto finish;
++error:
++    compressed_fail(ao, "invalid compressed E-AC-3 packet delivery", 0);
++finish:
++    talloc_free(sample_sizes);
++    if (compact_data)
++        CFAllocatorDeallocate(NULL, compact_data);
++    if (block_buffer)
++        CFRelease(block_buffer);
++    if (sample_buffer)
++        CFRelease(sample_buffer);
++}
++
++static bool open_compressed_parser(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    OSStatus err = AudioFileStreamOpen(
++        ao,
++        compressed_property_listener,
++        compressed_packets_listener,
++        0,
++        &p->compressed_parser
++    );
++    if (err != noErr) {
++        compressed_fail(ao, "failed to initialize compressed E-AC-3 parser", err);
++        return false;
++    }
++    p->compressed_discontinuity = true;
++    p->compressed_time_initialized = false;
++    p->compressed_failed = false;
++    p->compressed_burst_count = 0;
++    p->compressed_packet_count = 0;
++    return true;
++}
++
++static void close_compressed_parser(struct priv *p)
++{
++    if (p->compressed_parser)
++        AudioFileStreamClose(p->compressed_parser);
++    p->compressed_parser = NULL;
++    TA_FREEP(&p->spdif_buffer);
++    p->spdif_buffer_size = 0;
++    p->spdif_buffer_capacity = 0;
++    TA_FREEP(&p->first_eac3_packet);
++    p->first_eac3_packet_size = 0;
++    if (p->format_description)
++        CFRelease(p->format_description);
++    p->format_description = NULL;
++}
++
++static bool parse_spdif_eac3(struct ao *ao, const uint8_t *data, size_t size)
++{
++    struct priv *p = ao->priv;
++    size_t required = p->spdif_buffer_size + size;
++    if (required > p->spdif_buffer_capacity) {
++        p->spdif_buffer = talloc_realloc_size(
++            p,
++            p->spdif_buffer,
++            required
++        );
++        if (!p->spdif_buffer) {
++            compressed_fail(ao, "failed to grow compressed E-AC-3 input buffer", 0);
++            return false;
++        }
++        p->spdif_buffer_capacity = required;
++    }
++    memcpy(p->spdif_buffer + p->spdif_buffer_size, data, size);
++    p->spdif_buffer_size += size;
++
++    size_t consumed = 0;
++    while (p->spdif_buffer_size - consumed >= IEC61937_HEADER_BYTES) {
++        const uint8_t *burst = p->spdif_buffer + consumed;
++        if (read_le16(burst) != 0xf872 || read_le16(burst + 2) != 0x4e1f ||
++            (read_le16(burst + 4) & 0x1f) != IEC61937_EAC3_DATA_TYPE)
++        {
++            compressed_fail(ao, "invalid IEC 61937 E-AC-3 burst header", 0);
++            return false;
++        }
++        if (p->spdif_buffer_size - consumed < IEC61937_EAC3_BURST_BYTES)
++            break;
++
++        size_t payload_size = read_le16(burst + 6);
++        if (!payload_size || payload_size > IEC61937_EAC3_BURST_BYTES - IEC61937_HEADER_BYTES) {
++            compressed_fail(ao, "invalid IEC 61937 E-AC-3 payload length", 0);
++            return false;
++        }
++        size_t wire_size = MP_ALIGN_UP(payload_size, 2);
++        uint8_t *payload = talloc_size(NULL, payload_size);
++        if (!payload) {
++            compressed_fail(ao, "failed to allocate compressed E-AC-3 payload", 0);
++            return false;
++        }
++        for (size_t n = 0; n < wire_size; n += 2) {
++            if (n < payload_size)
++                payload[n] = burst[IEC61937_HEADER_BYTES + n + 1];
++            if (n + 1 < payload_size)
++                payload[n + 1] = burst[IEC61937_HEADER_BYTES + n];
++        }
++
++        if (!p->first_eac3_packet) {
++            p->first_eac3_packet = talloc_memdup(p, payload, payload_size);
++            p->first_eac3_packet_size = payload_size;
++        }
++        AudioFileStreamParseFlags flags = p->compressed_discontinuity
++            ? kAudioFileStreamParseFlag_Discontinuity : 0;
++        p->compressed_discontinuity = false;
++        OSStatus err = AudioFileStreamParseBytes(
++            p->compressed_parser,
++            (UInt32)payload_size,
++            payload,
++            flags
++        );
++        talloc_free(payload);
++        if (err != noErr || p->compressed_failed) {
++            compressed_fail(ao, "failed to parse compressed E-AC-3 payload", err);
++            return false;
++        }
++        p->compressed_burst_count++;
++        consumed += IEC61937_EAC3_BURST_BYTES;
++    }
++
++    if (consumed) {
++        memmove(p->spdif_buffer,
++                p->spdif_buffer + consumed,
++                p->spdif_buffer_size - consumed);
++        p->spdif_buffer_size -= consumed;
++    }
++    return true;
++}
++
++static bool finish_spdif_eac3(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    if (p->spdif_buffer_size || !p->first_eac3_packet)
++        return false;
++
++    // AudioFileStream retains one complete raw E-AC-3 packet for lookahead.
++    // Feed one already-consumed complete packet and immediately close/reset the
++    // parser after the retained real packet is delivered. The duplicate itself
++    // remains buffered and is never enqueued.
++    OSStatus err = AudioFileStreamParseBytes(
++        p->compressed_parser,
++        (UInt32)p->first_eac3_packet_size,
++        p->first_eac3_packet,
++        0
++    );
++    if (err != noErr || p->compressed_failed ||
++        p->compressed_packet_count != p->compressed_burst_count)
++    {
++        compressed_fail(ao, "compressed E-AC-3 parser did not deliver every burst", err);
++        return false;
++    }
++    MP_INFO(ao, "compressed E-AC-3 delivery complete: %llu packets\n",
++            (unsigned long long)p->compressed_packet_count);
++    return true;
++}
++
+ static void feed(struct ao *ao)
+ {
+     struct priv *p = ao->priv;
+@@ -80,11 +489,29 @@ static void feed(struct ao *ao)
+     int64_t time_delta = CMTimeGetNanoseconds(CMTimeMake(request_sample_count, samplerate));
+     bool eof;
+     int real_sample_count = ao_read_data(ao, data, request_sample_count, end_time_av - cur_time_av + cur_time_mp + time_delta, &eof, false, true);
+-    if (eof) {
+-        [p->renderer stopRequestingMediaData];
+-        ao_stop_streaming(ao);
+-    }
+     if (real_sample_count == 0) {
++        if (eof) {
++            if (p->compressed_eac3 && !finish_spdif_eac3(ao))
++                goto error;
++            [p->renderer stopRequestingMediaData];
++            ao_stop_streaming(ao);
++        }
++        goto finish;
++    }
++
++    if (p->compressed_eac3) {
++        if (!p->compressed_time_initialized) {
++            p->end_time_av = end_time_av;
++            p->compressed_time_initialized = true;
++        }
++        if (!parse_spdif_eac3(ao, data[0], real_sample_count * sstride))
++            goto error;
++        if (eof) {
++            if (!finish_spdif_eac3(ao))
++                goto error;
++            [p->renderer stopRequestingMediaData];
++            ao_stop_streaming(ao);
++        }
+         goto finish;
+     }
+
+@@ -147,6 +574,12 @@ static void start(struct ao *ao)
+     struct priv *p = ao->priv;
+
+     p->end_time_av = -1;
++    if (p->compressed_eac3 && !p->compressed_parser &&
++        !open_compressed_parser(ao))
++    {
++        ao_request_reload(ao);
++        return;
++    }
+     [p->synchronizer setRate:1];
+     [p->renderer requestMediaDataWhenReadyOnQueue:p->queue usingBlock:^{
+         feed(ao);
+@@ -162,6 +595,8 @@ static void stop(struct ao *ao)
+         [p->renderer flush];
+         [p->synchronizer setRate:0];
+     });
++    if (p->compressed_eac3)
++        close_compressed_parser(p);
+ }
+
+ static bool set_pause(struct ao *ao, bool paused)
+@@ -276,43 +711,51 @@ static int init(struct ao *ao)
+ #endif
+
+     if (af_fmt_is_spdif(ao->format)) {
+-        MP_FATAL(ao, "avfoundation does not support SPDIF\n");
++        if (ao->format == AF_FORMAT_S_EAC3 && p->compressed_eac3_enabled) {
++            p->compressed_eac3 = true;
++            MP_INFO(ao, "accepting E-AC-3 access units through the compressed "
++                    "AVSampleBufferAudioRenderer path\n");
++        } else {
++            MP_FATAL(ao, "avfoundation does not support this SPDIF format\n");
+ #if HAVE_COREAUDIO
+-        MP_FATAL(ao, "please use coreaudio_exclusive instead\n");
++            MP_FATAL(ao, "please use coreaudio_exclusive instead\n");
+ #endif
+-        goto error;
++            goto error;
++        }
+     }
+
+-    // AVSampleBufferAudioRenderer only supports interleaved formats
+-    ao->format = af_fmt_from_planar(ao->format);
+-    if (af_fmt_is_planar(ao->format)) {
+-        MP_FATAL(ao, "planar audio formats are unsupported\n");
+-        goto error;
++    if (!p->compressed_eac3) {
++        // AVSampleBufferAudioRenderer only supports interleaved PCM formats.
++        ao->format = af_fmt_from_planar(ao->format);
++        if (af_fmt_is_planar(ao->format)) {
++            MP_FATAL(ao, "planar audio formats are unsupported\n");
++            goto error;
++        }
++
++        AudioStreamBasicDescription asbd;
++        ca_fill_asbd(ao, &asbd);
++        size_t layout_size;
++        layout = ca_get_acl(ao, &layout_size);
++
++        OSStatus err;
++        if ((err = CMAudioFormatDescriptionCreate(
++            NULL,
++            &asbd,
++            layout_size,
++            layout,
++            0,
++            NULL,
++            NULL,
++            &p->format_description
++        )) != noErr) {
++            MP_FATAL(ao, "failed to create audio format description\n");
++            MP_VERBOSE(ao, "CMAudioFormatDescriptionCreate returned %d\n", err);
++            goto error;
++        }
++        talloc_free(layout);
++        layout = NULL;
+     }
+
+-    AudioStreamBasicDescription asbd;
+-    ca_fill_asbd(ao, &asbd);
+-    size_t layout_size;
+-    layout = ca_get_acl(ao, &layout_size);
+-
+-    OSStatus err;
+-    if ((err = CMAudioFormatDescriptionCreate(
+-        NULL,
+-        &asbd,
+-        layout_size,
+-        layout,
+-        0,
+-        NULL,
+-        NULL,
+-        &p->format_description
+-    )) != noErr) {
+-        MP_FATAL(ao, "failed to create audio format description\n");
+-        MP_VERBOSE(ao, "CMAudioFormatDescriptionCreate returned %d\n", err);
+-        goto error;
+-    }
+-    talloc_free(layout);
+-    layout = NULL;
+-
+     // AVSampleBufferAudioRenderer read ahead aggressively
+     ao->device_buffer = ao->samplerate * 2;
+
+@@ -332,6 +775,7 @@ error:
+     if (p->renderer) [p->renderer release];
+     if (p->synchronizer) [p->synchronizer release];
+     if (p->queue) dispatch_release(p->queue);
++    if (p->compressed_parser) AudioFileStreamClose(p->compressed_parser);
+     if (p->format_description) CFRelease(p->format_description);
+
+ #if TARGET_OS_IPHONE
+@@ -355,7 +799,8 @@ static void uninit(struct ao *ao)
+     [p->renderer release];
+     [p->synchronizer release];
+     dispatch_release(p->queue);
+-    CFRelease(p->format_description);
++    if (p->format_description)
++        CFRelease(p->format_description);
+
+     [[NSNotificationCenter defaultCenter] removeObserver:p->observer];
+     [p->observer release];
+@@ -387,6 +832,7 @@ const struct ao_driver audio_out_avfoundation = {
+     .priv_size      = sizeof(struct priv),
+     .options = (const struct m_option[]){
+         {"host-managed-audio-session", OPT_BOOL(host_managed_audio_session)},
++        {"compressed-eac3", OPT_BOOL(compressed_eac3_enabled)},
+         {0}
+     },
+     .options_prefix = "avfoundation",
