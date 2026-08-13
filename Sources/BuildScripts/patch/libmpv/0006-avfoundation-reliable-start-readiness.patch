@@ -1,0 +1,16 @@
+diff --git a/audio/out/ao_avfoundation.m b/audio/out/ao_avfoundation.m
+index c779eb9..53298e2 100644
+--- a/audio/out/ao_avfoundation.m
++++ b/audio/out/ao_avfoundation.m
+@@ -707,5 +707,10 @@ static int init(struct ao *ao)
+ #if HAVE_MACOS_11_3_FEATURES
+     if (@available(tvOS 14.5, iOS 14.5, macOS 11.3, *)) {
+-        [p->synchronizer setDelaysRateChangeUntilHasSufficientMediaData:NO];
++        // The renderer, not mpv's source buffer, owns Apple output readiness.
++        // In particular, an AirPlay route may need to establish its remote
++        // playout buffer after the audio session is active. Starting the
++        // synchronizer immediately makes mpv's clock advance while that
++        // renderer is still silent and produces repeated AO underruns.
++        [p->synchronizer setDelaysRateChangeUntilHasSufficientMediaData:YES];
+     }
+ #endif
