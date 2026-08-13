@@ -1,0 +1,250 @@
+diff --git a/audio/out/ao_avfoundation.m b/audio/out/ao_avfoundation.m
+index 53973e3..68e02ca 100644
+--- a/audio/out/ao_avfoundation.m
++++ b/audio/out/ao_avfoundation.m
+@@ -38,6 +38,7 @@
+     struct ao *ao;
+ }
+ - (void)handleRestartNotification:(NSNotification*)notification;
++- (void)handleRateChangeNotification:(NSNotification*)notification;
+ @end
+ 
+ struct priv {
+@@ -61,6 +62,10 @@ struct priv {
+     bool compressed_failed;
+     uint64_t compressed_burst_count;
+     uint64_t compressed_packet_count;
++    bool sufficient_media_observed;
++    bool last_sufficient_media;
++    uint64_t enqueued_sample_count;
++    int64_t last_progress_log_ns;
+ };
+ 
+ #define IEC61937_EAC3_BURST_BYTES 24576
+@@ -78,6 +83,78 @@ static CMTime CMTimeFromNanoseconds(int64_t time)
+     return CMTimeMake(time, 1000000000);
+ }
+ 
++static const char *renderer_status_name(AVQueuedSampleBufferRenderingStatus status)
++{
++    switch (status) {
++    case AVQueuedSampleBufferRenderingStatusUnknown:
++        return "unknown";
++    case AVQueuedSampleBufferRenderingStatusRendering:
++        return "rendering";
++    case AVQueuedSampleBufferRenderingStatusFailed:
++        return "failed";
++    }
++    return "invalid";
++}
++
++static void log_renderer_state(struct ao *ao, const char *event)
++{
++    struct priv *p = ao->priv;
++    AVQueuedSampleBufferRenderingStatus status = p->renderer.status;
++    NSError *error = p->renderer.error;
++    bool sufficient = false;
++#if HAVE_MACOS_11_3_FEATURES
++    if (@available(tvOS 14.5, iOS 14.5, macOS 11.3, *))
++        sufficient = p->renderer.hasSufficientMediaDataForReliablePlaybackStart;
++#endif
++    CMTime current_time = [p->synchronizer currentTime];
++    double seconds = CMTIME_IS_NUMERIC(current_time)
++        ? CMTimeGetSeconds(current_time) : -1.0;
++    double timebase_rate = CMTimebaseGetRate(p->synchronizer.timebase);
++    const char *error_domain = error ? error.domain.UTF8String : "none";
++    long error_code = error ? (long)error.code : 0;
++
++    // Warning level is intentional: Marquee requests warning-level libmpv
++    // messages so authenticated media URLs never enter its shareable log.
++    MP_WARN(ao, "apple-renderer-state event=%s status=%s errorDomain=%s "
++            "errorCode=%ld sufficient=%s readyForMore=%s synchronizerRate=%.3f "
++            "timebaseRate=%.3f time=%.3f\n",
++            event, renderer_status_name(status), error_domain, error_code,
++            sufficient ? "true" : "false",
++            p->renderer.readyForMoreMediaData ? "true" : "false",
++            p->synchronizer.rate, timebase_rate, seconds);
++}
++
++static void record_renderer_progress(struct ao *ao, uint64_t sample_count)
++{
++    struct priv *p = ao->priv;
++    p->enqueued_sample_count += sample_count;
++
++    bool sufficient = false;
++#if HAVE_MACOS_11_3_FEATURES
++    if (@available(tvOS 14.5, iOS 14.5, macOS 11.3, *))
++        sufficient = p->renderer.hasSufficientMediaDataForReliablePlaybackStart;
++#endif
++    if (!p->sufficient_media_observed ||
++        sufficient != p->last_sufficient_media)
++    {
++        p->sufficient_media_observed = true;
++        p->last_sufficient_media = sufficient;
++        log_renderer_state(ao, "sufficient-media-change");
++    }
++
++    int64_t now = mp_time_ns();
++    if (!p->last_progress_log_ns ||
++        now - p->last_progress_log_ns >= INT64_C(5000000000))
++    {
++        p->last_progress_log_ns = now;
++        MP_WARN(ao, "apple-renderer-progress enqueuedSamples=%llu "
++                "enqueuedEnd=%.3f\n",
++                (unsigned long long)p->enqueued_sample_count,
++                p->end_time_av / 1e9);
++        log_renderer_state(ao, "progress");
++    }
++}
++
+ static uint16_t read_le16(const uint8_t *data)
+ {
+     return data[0] | data[1] << 8;
+@@ -308,6 +385,10 @@ static void compressed_packets_listener(
+     int64_t packet_duration = CMTimeGetNanoseconds(timing.duration);
+     p->end_time_av += packet_duration * packet_count;
+     p->compressed_packet_count += packet_count;
++    record_renderer_progress(
++        ao,
++        (uint64_t)asbd->mFramesPerPacket * packet_count
++    );
+     goto finish;
+ 
+ apple_error:
+@@ -558,6 +639,7 @@ static void feed(struct ao *ao)
+ 
+     time_delta = CMTimeGetNanoseconds(CMTimeMake(real_sample_count, samplerate));
+     p->end_time_av = end_time_av + time_delta;
++    record_renderer_progress(ao, real_sample_count);
+ 
+     goto finish;
+ 
+@@ -574,12 +656,16 @@ static void start(struct ao *ao)
+     struct priv *p = ao->priv;
+ 
+     p->end_time_av = -1;
++    p->sufficient_media_observed = false;
++    p->enqueued_sample_count = 0;
++    p->last_progress_log_ns = 0;
+     if (p->compressed_eac3 && !p->compressed_parser &&
+         !open_compressed_parser(ao))
+     {
+         ao_request_reload(ao);
+         return;
+     }
++    log_renderer_state(ao, "start-requested");
+     [p->synchronizer setRate:1];
+     [p->renderer requestMediaDataWhenReadyOnQueue:p->queue usingBlock:^{
+         feed(ao);
+@@ -591,6 +677,7 @@ static void stop(struct ao *ao)
+     struct priv *p = ao->priv;
+ 
+     dispatch_sync(p->queue, ^{
++        log_renderer_state(ao, "stop-requested");
+         [p->renderer stopRequestingMediaData];
+         [p->renderer flush];
+         [p->synchronizer setRate:0];
+@@ -604,8 +691,10 @@ static bool set_pause(struct ao *ao, bool paused)
+     struct priv *p = ao->priv;
+ 
+     if (paused) {
++        log_renderer_state(ao, "pause-requested");
+         [p->synchronizer setRate:0];
+     } else {
++        log_renderer_state(ao, "resume-requested");
+         [p->synchronizer setRate:1];
+     }
+ 
+@@ -644,13 +733,27 @@ static int control(struct ao *ao, enum aocontrol cmd, void *arg)
+ }
+ - (void)handleRestartNotification:(NSNotification*)notification {
+     struct priv *p = ao->priv;
+-    MP_VERBOSE(ao, "notification name: %s\n", notification.name.UTF8String);
++    if ([notification.name isEqualToString:
++            AVSampleBufferAudioRendererWasFlushedAutomaticallyNotification])
++    {
++        NSValue *value = notification.userInfo[
++            AVSampleBufferAudioRendererFlushTimeKey
++        ];
++        CMTime flush_time = value ? value.CMTimeValue : kCMTimeInvalid;
++        double seconds = CMTIME_IS_NUMERIC(flush_time)
++            ? CMTimeGetSeconds(flush_time) : -1.0;
++        MP_WARN(ao, "apple-renderer-automatic-flush time=%.3f\n", seconds);
++        log_renderer_state(ao, "automatic-flush");
++    } else {
++        MP_WARN(ao, "apple-renderer-output-configuration-change\n");
++        log_renderer_state(ao, "output-configuration-change");
++    }
+     if (p->host_managed_audio_session) {
+         // The embedding application owns the process-wide AVAudioSession and
+         // route generation. Ask mpv's player core to recreate the AO at its
+         // normal synchronized boundary; directly flushing and restarting this
+         // renderer leaves the audio clock detached from the video timeline.
+-        MP_VERBOSE(ao, "requesting synchronized audio-output reload\n");
++        MP_WARN(ao, "apple-renderer-reload-requested owner=host\n");
+         ao_request_reload(ao);
+         return;
+     }
+@@ -658,6 +761,26 @@ static int control(struct ao *ao, enum aocontrol cmd, void *arg)
+     stop(ao);
+     start(ao);
+ }
++- (void)handleRateChangeNotification:(NSNotification*)notification {
++    (void)notification;
++    log_renderer_state(ao, "rate-change");
++}
++- (void)observeValueForKeyPath:(NSString*)keyPath
++                      ofObject:(id)object
++                        change:(NSDictionary<NSKeyValueChangeKey, id>*)change
++                       context:(void*)context {
++    (void)object;
++    (void)change;
++    (void)context;
++    if ([keyPath isEqualToString:@"status"]) {
++        log_renderer_state(ao, "status-change");
++        return;
++    }
++    [super observeValueForKeyPath:keyPath
++                         ofObject:object
++                           change:change
++                          context:context];
++}
+ @end
+ 
+ static int init(struct ao *ao)
+@@ -766,6 +889,15 @@ static int init(struct ao *ao)
+ 
+     p->observer = [[AVObserver alloc] initWithAO:ao];
+     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
++    [p->renderer addObserver:p->observer
++                  forKeyPath:@"status"
++                     options:NSKeyValueObservingOptionInitial |
++                             NSKeyValueObservingOptionNew
++                     context:NULL];
++    [center addObserver:p->observer
++               selector:@selector(handleRateChangeNotification:)
++                   name:AVSampleBufferRenderSynchronizerRateDidChangeNotification
++                 object:p->synchronizer];
+ #if HAVE_MACOS_12_FEATURES
+     if (@available(tvOS 15.0, iOS 15.0, macOS 12.0, *)) {
+         [center addObserver:p->observer selector:@selector(handleRestartNotification:) name:AVSampleBufferAudioRendererOutputConfigurationDidChangeNotification object:p->renderer];
+@@ -801,15 +933,16 @@ static void uninit(struct ao *ao)
+ 
+     stop(ao);
+ 
++    [[NSNotificationCenter defaultCenter] removeObserver:p->observer];
++    [p->renderer removeObserver:p->observer forKeyPath:@"status"];
++    [p->observer release];
++
+     [p->renderer release];
+     [p->synchronizer release];
+     dispatch_release(p->queue);
+     if (p->format_description)
+         CFRelease(p->format_description);
+ 
+-    [[NSNotificationCenter defaultCenter] removeObserver:p->observer];
+-    [p->observer release];
+-
+ #if TARGET_OS_IPHONE
+     if (!p->host_managed_audio_session) {
+         [AVAudioSession.sharedInstance setActive:NO
