@@ -10,7 +10,7 @@
 
 It includes scripts to build `mpv` native libraries.
 
-The `1.0.0-marquee.4` fork adds two opt-in AVFoundation contracts while
+The `1.0.0-marquee.7` fork adds two opt-in AVFoundation contracts while
 retaining upstream behavior by default. Embedders may use
 `avfoundation-host-managed-audio-session=yes` to keep process-wide Apple audio
 session ownership in the host, and may combine
