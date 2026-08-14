@@ -10,7 +10,7 @@
 
 It includes scripts to build `mpv` native libraries.
 
-The `1.0.0-marquee.7` fork adds two opt-in AVFoundation contracts while
+The `1.0.0-marquee.9` fork adds three opt-in AVFoundation contracts while
 retaining upstream behavior by default. Embedders may use
 `avfoundation-host-managed-audio-session=yes` to keep process-wide Apple audio
 session ownership in the host, and may combine
@@ -19,6 +19,13 @@ access units to MPV's existing `AVSampleBufferAudioRenderer` clock. The latter
 accepts only E-AC-3 and fails closed for every other compressed format. Apple
 audio output also leaves the synchronizer's reliable-start gate enabled, so
 playback rate cannot advance before its renderer has sufficient media data.
+With `avfoundation-bounded-pcm-ring=yes`, decoded PCM uses a fixed 64-slot ring
+instead of transferring one newly allocated block to the renderer for every
+tenth of a second. CoreMedia's block-release callback is the only authority that
+returns a slot to the pool. This bounds eight-channel 48 kHz float PCM backing
+memory to 9.375 MiB, fails closed while every slot remains owned, and reports
+current queued bytes, fixed pool bytes, in-use slots, and reuse separately from
+lifetime throughput.
 
 Forked from [kingslay/FFmpegKit](https://github.com/kingslay/FFmpegKit)
 

@@ -1,0 +1,217 @@
+diff --git a/audio/out/ao_avfoundation.m b/audio/out/ao_avfoundation.m
+index 68e02ca..4ef558c 100644
+--- a/audio/out/ao_avfoundation.m
++++ b/audio/out/ao_avfoundation.m
+@@ -28,2 +28,4 @@
+-
++
++#include <stdatomic.h>
++
+ #import <AVFoundation/AVFoundation.h>
+@@ -43,2 +45,8 @@
+-
++
++struct pcm_ring_slot {
++    void *data;
++    atomic_bool leased;
++    uint64_t lease_count;
++};
++
+ struct priv {
+@@ -51,2 +59,3 @@ struct priv {
+     bool host_managed_audio_session;
++    bool bounded_pcm_ring;
+     bool compressed_eac3_enabled;
+@@ -68,2 +77,6 @@ struct priv {
+     int64_t last_progress_log_ns;
++    struct pcm_ring_slot pcm_ring[64];
++    size_t pcm_ring_block_size;
++    unsigned int pcm_ring_next;
++    uint64_t pcm_ring_reuse_count;
+ };
+@@ -73,2 +86,3 @@ struct priv {
+ #define IEC61937_EAC3_DATA_TYPE 0x15
++#define PCM_RING_SLOT_COUNT 64
+ 
+@@ -149,6 +163,27 @@ static void record_renderer_progress(struct ao *ao, uint64_t sample_count)
+         p->last_progress_log_ns = now;
++        int64_t current_ns = CMTimeGetNanoseconds([p->synchronizer currentTime]);
++        int64_t queued_ns = MPMAX(INT64_C(0), p->end_time_av - current_ns);
++        uint64_t queued_samples = queued_ns > 0
++            ? (uint64_t)((long double)queued_ns * ao->samplerate / 1e9L) : 0;
++        uint64_t queued_bytes = queued_samples * ao->sstride;
++        unsigned int in_use_slots = 0;
++        if (p->bounded_pcm_ring && !p->compressed_eac3) {
++            for (int n = 0; n < PCM_RING_SLOT_COUNT; n++) {
++                if (atomic_load_explicit(&p->pcm_ring[n].leased, memory_order_acquire))
++                    in_use_slots++;
++            }
++        }
+         MP_WARN(ao, "apple-renderer-progress enqueuedSamples=%llu "
+-                "enqueuedEnd=%.3f\n",
++                "queuedSamples=%llu queuedBytes=%llu poolBytes=%llu "
++                "poolSlots=%d inUseSlots=%u reusedSlots=%llu "
++                "enqueuedEnd=%.3f currentTime=%.3f\n",
+                 (unsigned long long)p->enqueued_sample_count,
+-                p->end_time_av / 1e9);
++                (unsigned long long)queued_samples,
++                (unsigned long long)queued_bytes,
++                (unsigned long long)(p->pcm_ring_block_size * PCM_RING_SLOT_COUNT),
++                p->bounded_pcm_ring && !p->compressed_eac3 ? PCM_RING_SLOT_COUNT : 0,
++                in_use_slots,
++                (unsigned long long)p->pcm_ring_reuse_count,
++                p->end_time_av / 1e9,
++                current_ns / 1e9);
+         log_renderer_state(ao, "progress");
+@@ -157,2 +192,71 @@ static void record_renderer_progress(struct ao *ao, uint64_t sample_count)
+ 
++static void free_pcm_ring(struct priv *p)
++{
++    if (!p->pcm_ring_block_size)
++        return;
++    for (int n = 0; n < PCM_RING_SLOT_COUNT; n++) {
++        // The renderer is flushed and released before this function. Its
++        // CMBlockBuffer release callbacks must therefore have returned every
++        // slot to the pool before backing storage can be destroyed.
++        mp_assert(!atomic_load_explicit(&p->pcm_ring[n].leased, memory_order_acquire));
++        if (p->pcm_ring[n].data)
++            CFAllocatorDeallocate(NULL, p->pcm_ring[n].data);
++        p->pcm_ring[n].data = NULL;
++        p->pcm_ring[n].lease_count = 0;
++    }
++    p->pcm_ring_block_size = 0;
++    p->pcm_ring_next = 0;
++}
++
++static bool allocate_pcm_ring(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    p->pcm_ring_block_size = (size_t)(ao->samplerate / 10) * ao->sstride;
++    if (!p->pcm_ring_block_size)
++        return false;
++    for (int n = 0; n < PCM_RING_SLOT_COUNT; n++)
++        atomic_init(&p->pcm_ring[n].leased, false);
++    for (int n = 0; n < PCM_RING_SLOT_COUNT; n++) {
++        p->pcm_ring[n].data = CFAllocatorAllocate(NULL, p->pcm_ring_block_size, 0);
++        if (!p->pcm_ring[n].data) {
++            free_pcm_ring(p);
++            return false;
++        }
++    }
++    MP_INFO(ao, "allocated bounded Apple PCM ring: slots=%d blockBytes=%llu "
++            "totalBytes=%llu\n", PCM_RING_SLOT_COUNT,
++            (unsigned long long)p->pcm_ring_block_size,
++            (unsigned long long)(p->pcm_ring_block_size * PCM_RING_SLOT_COUNT));
++    return true;
++}
++
++static void release_pcm_ring_block(void *refcon, void *memory, size_t size)
++{
++    (void)memory;
++    (void)size;
++    struct pcm_ring_slot *slot = refcon;
++    atomic_store_explicit(&slot->leased, false, memory_order_release);
++}
++
++static int acquire_pcm_ring_slot(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    for (int n = 0; n < PCM_RING_SLOT_COUNT; n++) {
++        unsigned int slot_index = p->pcm_ring_next++ % PCM_RING_SLOT_COUNT;
++        struct pcm_ring_slot *slot = &p->pcm_ring[slot_index];
++        bool expected = false;
++        if (atomic_compare_exchange_strong_explicit(
++                &slot->leased, &expected, true,
++                memory_order_acq_rel, memory_order_relaxed))
++        {
++            if (slot->lease_count)
++                p->pcm_ring_reuse_count++;
++            slot->lease_count++;
++            return slot_index;
++        }
++    }
++    MP_FATAL(ao, "bounded Apple PCM ring exhausted while CoreMedia still owns every slot\n");
++    return -1;
++}
++
+ static uint16_t read_le16(const uint8_t *data)
+@@ -562,7 +666,21 @@ static void feed(struct ao *ao)
+-
++
++    int64_t cur_time_av = CMTimeGetNanoseconds([p->synchronizer currentTime]);
+     int request_sample_count = samplerate / 10;
+     int buffer_size = request_sample_count * sstride;
+-    void *data[] = {CFAllocatorAllocate(NULL, buffer_size, 0)};
++    int pcm_ring_slot = -1;
++    bool data_owned = p->compressed_eac3 || !p->bounded_pcm_ring;
++    void *data[] = {NULL};
++    if (data_owned) {
++        data[0] = CFAllocatorAllocate(NULL, buffer_size, 0);
++    } else {
++        pcm_ring_slot = acquire_pcm_ring_slot(ao);
++        if (pcm_ring_slot < 0)
++            goto error;
++        data[0] = p->pcm_ring[pcm_ring_slot].data;
++    }
++    if (!data[0]) {
++        MP_FATAL(ao, "failed to acquire Apple audio sample memory\n");
++        goto error;
++    }
+ 
+-    int64_t cur_time_av = CMTimeGetNanoseconds([p->synchronizer currentTime]);
+     int64_t cur_time_mp = mp_time_ns();
+@@ -598,2 +716,7 @@ static void feed(struct ao *ao)
+-
++
++    CMBlockBufferCustomBlockSource ring_block_source = {0};
++    ring_block_source.version = kCMBlockBufferCustomBlockSourceVersion;
++    ring_block_source.AllocateBlock = NULL;
++    ring_block_source.FreeBlock = release_pcm_ring_block;
++    ring_block_source.refCon = pcm_ring_slot >= 0 ? &p->pcm_ring[pcm_ring_slot] : NULL;
+     if ((err = CMBlockBufferCreateWithMemoryBlock(
+@@ -602,4 +725,4 @@ static void feed(struct ao *ao)
+         buffer_size,
+-        NULL,
+-        NULL,
++        data_owned ? NULL : kCFAllocatorNull,
++        pcm_ring_slot >= 0 ? &ring_block_source : NULL,
+         0,
+@@ -613,4 +736,4 @@ static void feed(struct ao *ao)
+     }
+-    data[0] = NULL;
+-
++    if (data_owned)
++        data[0] = NULL;
+     CMSampleTimingInfo sample_timing_into[] = {(CMSampleTimingInfo) {
+@@ -648,3 +771,6 @@ error:
+ finish:
+-    if (data[0]) CFAllocatorDeallocate(NULL, data[0]);
++    if (pcm_ring_slot >= 0 && !block_buffer)
++        atomic_store_explicit(&p->pcm_ring[pcm_ring_slot].leased, false,
++                              memory_order_release);
++    if (data_owned && data[0]) CFAllocatorDeallocate(NULL, data[0]);
+     if (block_buffer) CFRelease(block_buffer);
+@@ -661,2 +787,4 @@ static void start(struct ao *ao)
+     p->last_progress_log_ns = 0;
++    p->pcm_ring_next = 0;
++    p->pcm_ring_reuse_count = 0;
+     if (p->compressed_eac3 && !p->compressed_parser &&
+@@ -884,2 +1012,6 @@ static int init(struct ao *ao)
+         layout = NULL;
++        if (p->bounded_pcm_ring && !allocate_pcm_ring(ao)) {
++            MP_FATAL(ao, "failed to allocate bounded Apple PCM ring\n");
++            goto error;
++        }
+     }
+@@ -916,2 +1048,3 @@ error:
+     if (p->format_description) CFRelease(p->format_description);
++    free_pcm_ring(p);
+ 
+@@ -944,2 +1077,3 @@ static void uninit(struct ao *ao)
+         CFRelease(p->format_description);
++    free_pcm_ring(p);
+ 
+@@ -972,2 +1106,3 @@ const struct ao_driver audio_out_avfoundation = {
+         {"host-managed-audio-session", OPT_BOOL(host_managed_audio_session)},
++        {"bounded-pcm-ring", OPT_BOOL(bounded_pcm_ring)},
+         {"compressed-eac3", OPT_BOOL(compressed_eac3_enabled)},
