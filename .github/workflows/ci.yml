@@ -27,6 +27,9 @@ jobs:
       - name: Show available SDKs
         run: xcodebuild -showsdks
 
+      - name: Verify AVFoundation PCM ring driver-init sizing
+        run: ./Sources/BuildScripts/verify-avfoundation-pcm-ring.sh
+
       - name: Build macOS
         run: |
           xcodebuild -resolvePackageDependencies \

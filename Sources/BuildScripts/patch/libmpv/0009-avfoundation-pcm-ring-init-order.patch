@@ -1,0 +1,169 @@
+diff --git a/audio/out/ao_avfoundation.m b/audio/out/ao_avfoundation.m
+index 4ef558c351084ed15284e9d43915147f9698e154..f2e20c2097a10a8cc8b95551499cbfaa36c306bb 100644
+--- a/audio/out/ao_avfoundation.m
++++ b/audio/out/ao_avfoundation.m
+@@ -19,6 +19,7 @@
+ #include "audio/format.h"
+ #include "audio/out/ao_coreaudio_chmap.h"
+ #include "audio/out/ao_coreaudio_utils.h"
++#include "audio/out/ao_avfoundation_ring.h"
+ #include "common/common.h"
+ #include "common/msg.h"
+ #include "internal.h"
+@@ -211,9 +212,23 @@ static void free_pcm_ring(struct priv *p)
+ static bool allocate_pcm_ring(struct ao *ao)
+ {
+     struct priv *p = ao->priv;
+-    p->pcm_ring_block_size = (size_t)(ao->samplerate / 10) * ao->sstride;
+-    if (!p->pcm_ring_block_size)
++    size_t frame_stride = 0;
++    size_t pool_size = 0;
++    int format_bytes = af_fmt_to_bytes(ao->format);
++    if (!avfoundation_pcm_ring_sizes(
++            ao->samplerate,
++            format_bytes,
++            ao->channels.num,
++            PCM_RING_SLOT_COUNT,
++            &frame_stride,
++            &p->pcm_ring_block_size,
++            &pool_size))
++    {
++        MP_FATAL(ao, "invalid bounded Apple PCM ring sizing: samplerate=%d "
++                 "formatBytes=%d channels=%d preinitSstride=%d\n",
++                 ao->samplerate, format_bytes, ao->channels.num, ao->sstride);
+         return false;
++    }
+     for (int n = 0; n < PCM_RING_SLOT_COUNT; n++)
+         atomic_init(&p->pcm_ring[n].leased, false);
+     for (int n = 0; n < PCM_RING_SLOT_COUNT; n++) {
+@@ -223,9 +238,12 @@ static bool allocate_pcm_ring(struct ao *ao)
+             return false;
+         }
+     }
+-    MP_INFO(ao, "allocated bounded Apple PCM ring: slots=%d blockBytes=%llu "
+-            "totalBytes=%llu\n", PCM_RING_SLOT_COUNT,
++    MP_INFO(ao, "allocated bounded Apple PCM ring: slots=%d frameBytes=%llu "
++            "blockBytes=%llu totalBytes=%llu preinitSstride=%d\n",
++            PCM_RING_SLOT_COUNT,
++            (unsigned long long)frame_stride,
+             (unsigned long long)p->pcm_ring_block_size,
+-            (unsigned long long)(p->pcm_ring_block_size * PCM_RING_SLOT_COUNT));
++            (unsigned long long)pool_size,
++            ao->sstride);
+     return true;
+ }
+
+diff --git a/audio/out/ao_avfoundation_ring.h b/audio/out/ao_avfoundation_ring.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..f872273406b9b2cd60849e710e48d4eab1461ee2
+--- /dev/null
++++ b/audio/out/ao_avfoundation_ring.h
+@@ -0,0 +1,44 @@
++#ifndef MP_AO_AVFOUNDATION_RING_H
++#define MP_AO_AVFOUNDATION_RING_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++// Audio drivers run init before ao.c publishes ao->sstride. Derive the ring
++// layout exclusively from facts already authoritative at driver init: the
++// normalized interleaved sample format, channel map, and sample rate.
++static inline bool avfoundation_pcm_ring_sizes(
++    int samplerate,
++    int format_bytes,
++    int channels,
++    size_t slot_count,
++    size_t *frame_stride,
++    size_t *block_size,
++    size_t *pool_size)
++{
++    if (samplerate < 10 || format_bytes <= 0 || channels <= 0 ||
++        slot_count == 0 || !frame_stride || !block_size || !pool_size)
++        return false;
++
++    size_t bytes = (size_t)format_bytes;
++    size_t channel_count = (size_t)channels;
++    size_t frames_per_block = (size_t)samplerate / 10;
++    if (bytes > SIZE_MAX / channel_count)
++        return false;
++
++    size_t stride = bytes * channel_count;
++    if (stride > SIZE_MAX / frames_per_block)
++        return false;
++
++    size_t block = stride * frames_per_block;
++    if (block > SIZE_MAX / slot_count)
++        return false;
++
++    *frame_stride = stride;
++    *block_size = block;
++    *pool_size = block * slot_count;
++    return true;
++}
++
++#endif
+diff --git a/test/ao_avfoundation_pcm_ring.c b/test/ao_avfoundation_pcm_ring.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..35c5810426363f87bcb0deef4ce53eba34de028b
+--- /dev/null
++++ b/test/ao_avfoundation_pcm_ring.c
+@@ -0,0 +1,42 @@
++#include <assert.h>
++#include <limits.h>
++#include <stddef.h>
++
++#include "audio/out/ao_avfoundation_ring.h"
++
++int main(void)
++{
++    size_t frame_stride = 0;
++    size_t block_size = 0;
++    size_t pool_size = 0;
++
++    // Reproduce the driver-init boundary from the physical tvOS incident:
++    // ao.c has not populated ao->sstride yet. Ring sizing must not depend on it.
++    int later_owned_ao_sstride = 0;
++    assert(later_owned_ao_sstride == 0);
++    assert(avfoundation_pcm_ring_sizes(
++        48000, 4, 2, 64, &frame_stride, &block_size, &pool_size));
++    assert(frame_stride == 8);
++    assert(block_size == 38400);
++    assert(pool_size == 2457600);
++
++    assert(avfoundation_pcm_ring_sizes(
++        48000, 2, 8, 64, &frame_stride, &block_size, &pool_size));
++    assert(frame_stride == 16);
++    assert(block_size == 76800);
++    assert(pool_size == 4915200);
++
++    assert(!avfoundation_pcm_ring_sizes(
++        0, 4, 2, 64, &frame_stride, &block_size, &pool_size));
++    assert(!avfoundation_pcm_ring_sizes(
++        48000, 0, 2, 64, &frame_stride, &block_size, &pool_size));
++    assert(!avfoundation_pcm_ring_sizes(
++        48000, 4, 0, 64, &frame_stride, &block_size, &pool_size));
++    assert(!avfoundation_pcm_ring_sizes(
++        48000, 4, 2, 0, &frame_stride, &block_size, &pool_size));
++    assert(!avfoundation_pcm_ring_sizes(
++        INT_MAX, INT_MAX, INT_MAX, SIZE_MAX,
++        &frame_stride, &block_size, &pool_size));
++
++    return 0;
++}
+diff --git a/test/meson.build b/test/meson.build
+index b67074166ba385057fb52071519e59e00e8c0948..05de9d2bb937935caa3dda9fb318fd18cf2ec80b 100644
+--- a/test/meson.build
++++ b/test/meson.build
+@@ -103,3 +103,10 @@ format = executable('format', files('format.c'), include_directories: incdir, link_with: test_utils)
+ test('format', format)
+-
++
++ao_avfoundation_pcm_ring = executable(
++    'ao-avfoundation-pcm-ring',
++    files('ao_avfoundation_pcm_ring.c'),
++    include_directories: incdir,
++)
++test('ao-avfoundation-pcm-ring', ao_avfoundation_pcm_ring)
++
+ language = executable('language', files('language.c'), include_directories: incdir, link_with: test_utils)

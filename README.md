@@ -25,7 +25,11 @@ tenth of a second. CoreMedia's block-release callback is the only authority that
 returns a slot to the pool. This bounds eight-channel 48 kHz float PCM backing
 memory to 9.375 MiB, fails closed while every slot remains owned, and reports
 current queued bytes, fixed pool bytes, in-use slots, and reuse separately from
-lifetime throughput.
+lifetime throughput. Ring sizing is derived during driver initialization from
+the normalized interleaved format and channel map rather than MPV's later-owned
+`ao->sstride` field. Checked arithmetic fails closed before allocation, and the
+causal regression intentionally exercises the driver-init state where that
+later field is still zero.
 
 Forked from [kingslay/FFmpegKit](https://github.com/kingslay/FFmpegKit)
 
