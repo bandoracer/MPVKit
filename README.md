@@ -10,7 +10,7 @@
 
 It includes scripts to build `mpv` native libraries.
 
-The `1.0.0-marquee.10` fork adds three opt-in AVFoundation contracts while
+The `1.0.0-marquee.11` fork adds three opt-in AVFoundation contracts while
 retaining upstream behavior by default. Embedders may use
 `avfoundation-host-managed-audio-session=yes` to keep process-wide Apple audio
 session ownership in the host, and may combine
@@ -30,6 +30,13 @@ the normalized interleaved format and channel map rather than MPV's later-owned
 `ao->sstride` field. Checked arithmetic fails closed before allocation, and the
 causal regression intentionally exercises the driver-init state where that
 later field is still zero.
+
+The fork also completes the custom MoltenVK context's live-resize contract.
+During mpv's `VOCTRL_CHECK_EVENTS` poll it compares the authoritative
+`CAMetalLayer.drawableSize` with the committed swapchain extent, rebuilds the
+swapchain through `ra_vk_ctx_resize`, and reports `VO_EVENT_RESIZE`. Because
+the video-output event loop owns this work, external-surface rotation and
+fit/fill changes remain correct while transport is either advancing or paused.
 
 Forked from [kingslay/FFmpegKit](https://github.com/kingslay/FFmpegKit)
 
