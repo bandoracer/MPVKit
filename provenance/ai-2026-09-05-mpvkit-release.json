@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "authorTag": "ai-2026-09-05-mpvkit-release",
+  "authors": [
+    {
+      "kind": "ai",
+      "name": "Codex",
+      "provider": "OpenAI",
+      "model": "GPT-6",
+      "modelVersion": "unknown",
+      "identityEvidence": "Session identifies GPT-6; exact snapshot unavailable."
+    }
+  ],
+  "baseCommit": "129640645bf6b4759d49ef32d89b9ca849c22e4e",
+  "summary": "Add context-owned paused drawable wakeups. Requires dynamic Swift drawable writes in Marquee.",
+  "artifacts": [
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0011-moltenvk-paused-resize-wakeup.patch",
+      "sha256": "a39dd5d7fc791d0a807df43f1d672a96bb77b29c55feb56ddb277ec30a90bb9e"
+    }
+  ],
+  "validation": "Complete-library developer candidate passed iOS 343 tests, macOS 341, tvOS 342+15, with existing skips and no failures. Actual iOS Simulator paused rotation retained frame and position. Clean-source packaging follows this source commit."
+}

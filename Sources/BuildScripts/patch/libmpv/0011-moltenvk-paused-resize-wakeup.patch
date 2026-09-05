@@ -1,0 +1,85 @@
+--- a/video/out/vulkan/context_moltenvk.m
++++ b/video/out/vulkan/context_moltenvk.m
+@@ -23,9 +23,64 @@
+ #include "context.h"
+ #include "utils.h"
+
++// Author-Tag: ai-2026-09-05-paused-geometry
++// A paused VO may sleep until explicitly woken. Geometry changes belong to
++// the layer, but swapchain/viewport commit remains on the video-output thread.
++// The observer's lock excludes a wakeup racing context destruction.
++@interface MPVMetalResizeObserver : NSObject {
++    NSLock *_lifetimeLock;
++    CAMetalLayer *_observedLayer;
++    struct vo *_owner;
++}
++- (instancetype)initWithLayer:(CAMetalLayer *)layer owner:(struct vo *)owner;
++- (void)invalidate;
++@end
++
++@implementation MPVMetalResizeObserver
++- (instancetype)initWithLayer:(CAMetalLayer *)layer owner:(struct vo *)owner
++{
++    if ((self = [super init])) {
++        _lifetimeLock = [[NSLock alloc] init];
++        _observedLayer = [layer retain];
++        _owner = owner;
++        [_observedLayer addObserver:self forKeyPath:@"drawableSize" options:0 context:NULL];
++    }
++    return self;
++}
++
++- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object
++                       change:(NSDictionary *)change context:(void *)context
++{
++    [_lifetimeLock lock];
++    if (_owner)
++        vo_wakeup(_owner);
++    [_lifetimeLock unlock];
++}
++
++- (void)invalidate
++{
++    [_lifetimeLock lock];
++    _owner = NULL;
++    [_lifetimeLock unlock];
++    if (_observedLayer) {
++        [_observedLayer removeObserver:self forKeyPath:@"drawableSize"];
++        [_observedLayer release];
++        _observedLayer = nil;
++    }
++}
++
++- (void)dealloc
++{
++    [self invalidate];
++    [_lifetimeLock release];
++    [super dealloc];
++}
++@end
++
+ struct priv {
+     struct mpvk_ctx vk;
+     CAMetalLayer *layer;
++    MPVMetalResizeObserver *resize_observer;
+     int width;
+     int height;
+ };
+@@ -33,6 +88,9 @@
+ static void moltenvk_uninit(struct ra_ctx *ctx)
+ {
+     struct priv *p = ctx->priv;
++    [p->resize_observer invalidate];
++    [p->resize_observer release];
++    p->resize_observer = nil;
+     ra_vk_ctx_uninit(ctx);
+     mpvk_uninit(&p->vk);
+ }
+@@ -69,6 +127,7 @@
+     if (!ra_vk_ctx_init(ctx, vk, params, VK_PRESENT_MODE_FIFO_KHR))
+         goto fail;
+
++    p->resize_observer = [[MPVMetalResizeObserver alloc] initWithLayer:p->layer owner:ctx->vo];
+     return true;
+ fail:
+     moltenvk_uninit(ctx);
