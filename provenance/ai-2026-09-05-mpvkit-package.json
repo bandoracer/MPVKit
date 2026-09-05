@@ -1,0 +1,76 @@
+{
+  "authorTag": "ai-2026-09-05-mpvkit-release",
+  "builderSource": "d2f71737a0042ad292a0cd9bcc0d60703c954e9f",
+  "builderClean": true,
+  "command": [
+    "make",
+    "build",
+    "platform=ios,tvos,macos",
+    "version=1.0.0-marquee.12"
+  ],
+  "patches": [
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0001-player-add-moltenvk-context.patch",
+      "sha256": "6f3625c0179f9b5665ab8b8b0d3c01a01e6ea0e67ad3e0e32b24a924c6804c07"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0002-revert-build-static.patch",
+      "sha256": "d3bbabb5dc307131a1c21e12265d935d061bd79e5042b5d111793c6a4a6498f9"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0003-enable-avfoundation-ao-tvos.patch",
+      "sha256": "693e8ace8057ac46c42195949777159c5aa37f9b7ce81f488758481973da9312"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0004-host-managed-apple-audio-session.patch",
+      "sha256": "b335e5405a33233d0e8320de9815fc672c8ccb1b359719f999159f75ea01e931"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0005-avfoundation-compressed-eac3.patch",
+      "sha256": "196525ba3df694317550ab452e6476d59d361339fda1ec458cd9c3e94eddb7c1"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0006-avfoundation-reliable-start-readiness.patch",
+      "sha256": "fd42635d43617c572d9d97999ef5b8fd551f4f48322b6164a29bbd7c25e1f9e7"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0007-avfoundation-renderer-observability.patch",
+      "sha256": "0a9adefec517e6bbd1fa66d2cc9fb5377903a947739fe6d112bef1a1da71eeba"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0008-avfoundation-bounded-pcm-ring.patch",
+      "sha256": "6ef68d7a8248e7df4d522a5d2ab90f0c82fb4e3f1c1783360fd7b5370670b503"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0009-avfoundation-pcm-ring-init-order.patch",
+      "sha256": "986dc3a94260d951769b0c28631704ea55836a60565fb2a17ab8122af31bbfaa"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0010-moltenvk-external-surface-resize.patch",
+      "sha256": "90a2269443e8b90165ce5c8f8603e628e9c7d9335a6c2665bef706f2ad29c2dd"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0011-moltenvk-paused-resize-wakeup.patch",
+      "sha256": "a39dd5d7fc791d0a807df43f1d672a96bb77b29c55feb56ddb277ec30a90bb9e"
+    }
+  ],
+  "artifactSHA256": "bebdce2f44a74a2a8ac190cfa1b0cdaf95bbb62127d1cc5b1453467ecb3feb32",
+  "validation": [
+    {
+      "platform": "ios",
+      "logSHA256": "e5d0aa2a9ddc618ec6947315bc57069ddc1bc1af7c682409cdf2b1cb376df77f",
+      "result": "passed"
+    },
+    {
+      "platform": "mac",
+      "logSHA256": "7e1e42aa28e315169774e76bdf112746401f490d16a5782423a79841f314f823",
+      "result": "passed"
+    },
+    {
+      "platform": "tvos",
+      "logSHA256": "57c3f4b8f50834c1c3c0d6cfefc8c384357e6941a5a67f1a198c51ccc4e28de4",
+      "result": "passed"
+    }
+  ],
+  "version": "1.0.0-marquee.12"
+}
