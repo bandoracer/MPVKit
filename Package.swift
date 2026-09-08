@@ -253,8 +253,8 @@ let package = Package(
 
         .binaryTarget(
             name: "Libavcodec",
-            url: "https://github.com/bandoracer/MPVKit/releases/download/1.0.0-marquee.11/Libavcodec.xcframework.zip",
-            checksum: "6109efdc70d960e423219a1a6bd60783a2732fa1e2b9fad6b5816cec9368e9c7"
+            url: "https://github.com/bandoracer/MPVKit/releases/download/1.0.0-marquee.14/Libavcodec.xcframework.zip",
+            checksum: "34e81a0d793c4235b22b28263a28d719d847d09e5f33e6902d89781eb7b47127"
         ),
         .binaryTarget(
             name: "Libavdevice",

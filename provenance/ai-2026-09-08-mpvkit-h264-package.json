@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "authorTag": "ai-2026-09-08-mpvkit-h264-package",
+  "authors": [
+    {
+      "kind": "ai",
+      "name": "Codex",
+      "provider": "OpenAI",
+      "model": "GPT-6",
+      "modelVersion": "unknown",
+      "identityEvidence": "Session identifies GPT-6; exact snapshot unavailable."
+    }
+  ],
+  "baseCommit": "d2084e00fadf86e4fb172eafd12e6d55adbaccef",
+  "summary": "Publish decoder-only MPVKit 1.0.0-marquee.14 for the authorized iPhone seek-fix installation. Other dependency URLs and checksums remain identical.",
+  "artifacts": [
+    {
+      "path": "Package.swift",
+      "sha256": "61058cbb403dfe228c3abef9039567bc0360d535da8b0f585f17c53e7c9e26aa"
+    },
+    {
+      "path": "Libavcodec.xcframework.zip",
+      "sha256": "34e81a0d793c4235b22b28263a28d719d847d09e5f33e6902d89781eb7b47127",
+      "size": 38800540
+    },
+    {
+      "path": "Makefile",
+      "sha256": "8b5985e592a03cac198050759763a76aa44e0ead5b56a4b32336f608be98611e"
+    }
+  ],
+  "validation": "Clean FFmpeg-only rebuild completed for all nine architecture slices. Every platform binary contains the H.264 hardware flush implementation. Real pixel/timestamp regression and app release checks recorded in the Marquee release evidence. The Swift builder completed compilation, XCFramework generation, packaging, and minimum-version checks; outer make then rejected the unregistered only-ffmpeg target. Registering both targeted build flags as phony fixes that wrapper; make only-ffmpeg only-libmpv passes. Fresh hardware regression passed in 15.6 seconds (Marquee receipt 2026-09-08T19-33-42.430Z-61379)."
+}
