@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "authorTag": "ai-2026-09-08-mpvkit-pcm-package",
+  "authors": [
+    {
+      "kind": "ai",
+      "name": "Codex",
+      "provider": "OpenAI",
+      "model": "GPT-6",
+      "modelVersion": "unknown",
+      "identityEvidence": "Session identifies GPT-6; exact snapshot unavailable."
+    }
+  ],
+  "baseCommit": "c580cafd6cc237e510ef06ffad8d62b5d76195dd",
+  "summary": "Publish MPVKit 1.0.0-marquee.13 non-GPL Libmpv package for the authorized Apple app deployment.",
+  "artifacts": [
+    {
+      "path": "Package.swift",
+      "sha256": "8d22aa6ba0862858073662af91877edca1bc717af92785ac4e6cd8332ca99272"
+    },
+    {
+      "path": "Libmpv.xcframework.zip",
+      "sha256": "c0b140cad6b5fd15783fc4215dcdcfec80f4c38910d8cd79953e1e0e55be1b77",
+      "size": 14411252
+    }
+  ],
+  "validation": "Clean source full libmpv rebuild against retained pinned dependency artifacts passed for all nine architectures across iOS, tvOS, macOS and both simulators. Five XCFramework platform binaries contain the PCM push marker. Native queue regression and final renderer integration tests passed before packaging. Public asset readback and ordinary app release checks follow."
+}
