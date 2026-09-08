@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "authorTag": "ai-2026-09-08-mpvkit-h264-release",
+  "authors": [
+    {
+      "kind": "ai",
+      "name": "Codex",
+      "provider": "OpenAI",
+      "model": "GPT-6",
+      "modelVersion": "unknown",
+      "identityEvidence": "Session identifies GPT-6; exact snapshot unavailable."
+    }
+  ],
+  "baseCommit": "85709fbb670dd6b41f7e507d7eb1caa394f294e5",
+  "summary": "Prepare H.264 hardware discontinuity fix and clean FFmpeg-only rebuild for the user-authorized iPhone installation. Existing other dependency artifacts remain pinned.",
+  "artifacts": [
+    {
+      "path": "Sources/BuildScripts/XCFrameworkBuild/main.swift",
+      "sha256": "e2a4394b19bf75d0ba19f3eff7ace9dc7259cafcc798b2d1be1dffdbcedf7a6c"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/FFmpeg/0001-h264-videotoolbox-seek-flush.patch",
+      "sha256": "d31e4eeed7882b11ba7fa09037aecfc488737948e7bd430c115951eaf3043f8f"
+    }
+  ],
+  "validation": "Patch previously verified with real software/hardware pixel and timestamp comparisons, including frame-thread flush ownership. Clean nine-architecture FFmpeg package build follows."
+}

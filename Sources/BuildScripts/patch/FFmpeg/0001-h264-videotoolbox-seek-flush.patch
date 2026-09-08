@@ -1,0 +1,107 @@
+diff --git a/libavcodec/videotoolbox.c b/libavcodec/videotoolbox.c
+index 2cd22cb..ea8f16a 100644
+--- a/libavcodec/videotoolbox.c
++++ b/libavcodec/videotoolbox.c
+@@ -756,4 +756,14 @@ static OSStatus videotoolbox_session_decode_frame(AVCodecContext *avctx)
+         return -1;
+
++    // Author-Tag: ai-2026-09-08-seek-flash-reproduction
++    // Recovery-point samples are not necessarily IDRs. Tell VideoToolbox
++    // explicitly when they begin a new decode sequence.
++    if (vtctx->reset_decoder && !((H264Context *)avctx->priv_data)->picture_idr) {
++        CMSetAttachment(sample_buf,
++                        kCMSampleBufferAttachmentKey_ResetDecoderBeforeDecoding,
++                        kCFBooleanTrue, kCMAttachmentMode_ShouldNotPropagate);
++        av_log(avctx, AV_LOG_VERBOSE, "VideoToolbox H.264 decode discontinuity\n");
++    }
++
+     status = VTDecompressionSessionDecodeFrame(videotoolbox->session,
+                                                sample_buf,
+@@ -761,6 +771,8 @@ static OSStatus videotoolbox_session_decode_frame(AVCodecContext *avctx)
+                                                NULL,    // sourceFrameRefCon
+                                                0);      // infoFlagsOut
+-    if (status == noErr)
++    if (status == noErr) {
++        vtctx->reset_decoder = false;
+         status = VTDecompressionSessionWaitForAsynchronousFrames(videotoolbox->session);
++    }
+
+     CFRelease(sample_buf);
+@@ -903,4 +915,5 @@ static int videotoolbox_start(AVCodecContext *avctx)
+ {
+     AVVideotoolboxContext *videotoolbox = videotoolbox_get_context(avctx);
++    VTContext *vtctx = avctx->internal->hwaccel_priv_data;
+     OSStatus status;
+     VTDecompressionOutputCallbackRecord decoder_cb;
+@@ -1026,4 +1039,5 @@ static int videotoolbox_start(AVCodecContext *avctx)
+         return AVERROR_INVALIDDATA;
+     case 0:
++        vtctx->reset_decoder = avctx->codec_id == AV_CODEC_ID_H264;
+         return 0;
+     default:
+@@ -1088,4 +1102,21 @@ static int videotoolbox_h264_end_frame(AVCodecContext *avctx)
+ }
+
++// Author-Tag: ai-2026-09-08-seek-flash-reproduction
++static void videotoolbox_h264_flush(AVCodecContext *avctx)
++{
++    VTContext *vtctx = avctx->internal->hwaccel_priv_data;
++
++    // H.264 flushes its software DPB at a discontinuity. VideoToolbox also
++    // retains reference pictures, which must not survive that boundary:
++    // open-GOP recovery pictures can otherwise reference the previous seek.
++    // The next submitted sample carries the CoreMedia discontinuity marker.
++    vtctx->reset_decoder = true;
++    vtctx->bitstream_size = 0;
++    if (vtctx->frame) {
++        CVPixelBufferRelease(vtctx->frame);
++        vtctx->frame = NULL;
++    }
++}
++
+ static int videotoolbox_hevc_start_frame(AVCodecContext *avctx,
+                                          const AVBufferRef *buffer_ref,
+@@ -1385,4 +1416,5 @@ const FFHWAccel ff_h264_videotoolbox_hwaccel = {
+     .decode_params  = videotoolbox_h264_decode_params,
+     .end_frame      = videotoolbox_h264_end_frame,
++    .flush          = videotoolbox_h264_flush,
+     .frame_params   = ff_videotoolbox_frame_params,
+     .init           = ff_videotoolbox_common_init,
+diff --git a/libavcodec/vt_internal.h b/libavcodec/vt_internal.h
+index b1eb073..32d3cf8 100644
+--- a/libavcodec/vt_internal.h
++++ b/libavcodec/vt_internal.h
+@@ -46,4 +46,7 @@ typedef struct VTContext {
+     uint8_t                     sps[3];
+     bool                        reconfig_needed;
++    // Author-Tag: ai-2026-09-08-seek-flash-reproduction
++    // Owned by the decoder; consumed only after a discontinuity sample is accepted.
++    bool                        reset_decoder;
+
+     void *logctx;
+diff --git a/libavcodec/pthread_frame.c b/libavcodec/pthread_frame.c
+index c285308..f17d49e 100644
+--- a/libavcodec/pthread_frame.c
++++ b/libavcodec/pthread_frame.c
+@@ -1002,5 +1002,21 @@ av_cold void ff_thread_flush(AVCodecContext *avctx)
+         p->result = 0;
+
++        // Author-Tag: ai-2026-09-08-seek-flash-reproduction
++        // Serialized hwaccels live in the parent stash while workers are
++        // parked. Let the first codec context flush that shared state once,
++        // then return ownership to the stash for the next submitted frame.
++        const int restore_hwaccel = i == 0 && fctx->stash_hwaccel;
++        if (restore_hwaccel) {
++            av_assert0(!p->avctx->hwaccel && !p->hwaccel_threadsafe);
++            FFSWAP(const AVHWAccel*, p->avctx->hwaccel, fctx->stash_hwaccel);
++            FFSWAP(void*, p->avctx->hwaccel_context, fctx->stash_hwaccel_context);
++            FFSWAP(void*, p->avctx->internal->hwaccel_priv_data, fctx->stash_hwaccel_priv);
++        }
+         avcodec_flush_buffers(p->avctx);
++        if (restore_hwaccel) {
++            FFSWAP(const AVHWAccel*, p->avctx->hwaccel, fctx->stash_hwaccel);
++            FFSWAP(void*, p->avctx->hwaccel_context, fctx->stash_hwaccel_context);
++            FFSWAP(void*, p->avctx->internal->hwaccel_priv_data, fctx->stash_hwaccel_priv);
++        }
+     }
+ }

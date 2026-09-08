@@ -10,6 +10,14 @@ do {
         exit(0)
     }
 
+    // Author-Tag: ai-2026-09-08-mpvkit-h264-release
+    // Decoder-only changes rebuild FFmpeg from clean architecture directories;
+    // unrelated, pinned third-party dependencies remain unchanged.
+    if options.contains("only-ffmpeg") {
+        try BuildFFMPEG().buildALL()
+        exit(0)
+    }
+
     // SSL
     try BuildOpenSSL().buildALL()
     try BuildGmp().buildALL()
