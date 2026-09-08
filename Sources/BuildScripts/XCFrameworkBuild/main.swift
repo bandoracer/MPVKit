@@ -4,6 +4,12 @@ do {
     let options = try ArgumentOptions.parse(CommandLine.arguments)
     try Build.performCommand(options)
 
+    // Rebuild libmpv against the existing, pinned dependency artifacts.
+    if options.contains("only-libmpv") {
+        try BuildMPV().buildALL()
+        exit(0)
+    }
+
     // SSL
     try BuildOpenSSL().buildALL()
     try BuildGmp().buildALL()

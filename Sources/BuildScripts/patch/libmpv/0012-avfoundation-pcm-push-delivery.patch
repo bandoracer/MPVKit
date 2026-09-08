@@ -1,0 +1,182 @@
+--- a/audio/out/ao_avfoundation.m
++++ b/audio/out/ao_avfoundation.m
+@@ -16,6 +16,7 @@
+  */
+
+ #include "ao.h"
++#include "ao_avfoundation_pcm_queue.h"
+ #include "audio/format.h"
+ #include "audio/out/ao_coreaudio_chmap.h"
+ #include "audio/out/ao_coreaudio_utils.h"
+@@ -672,7 +673,7 @@
+     return true;
+ }
+
+-static void feed(struct ao *ao)
++static bool enqueue_audio(struct ao *ao, void **input, int input_samples)
+ {
+     struct priv *p = ao->priv;
+     int samplerate = ao->samplerate;
+@@ -683,7 +684,8 @@
+     OSStatus err;
+
+     int64_t cur_time_av = CMTimeGetNanoseconds([p->synchronizer currentTime]);
+-    int request_sample_count = samplerate / 10;
++    bool succeeded = true;
++    int request_sample_count = input ? input_samples : samplerate / 10;
+     int buffer_size = request_sample_count * sstride;
+     int pcm_ring_slot = -1;
+     bool data_owned = p->compressed_eac3 || !p->bounded_pcm_ring;
+@@ -704,8 +706,15 @@
+     int64_t cur_time_mp = mp_time_ns();
+     int64_t end_time_av = MPMAX(p->end_time_av, cur_time_av);
+     int64_t time_delta = CMTimeGetNanoseconds(CMTimeMake(request_sample_count, samplerate));
+-    bool eof;
+-    int real_sample_count = ao_read_data(ao, data, request_sample_count, end_time_av - cur_time_av + cur_time_mp + time_delta, &eof, false, true);
++    bool eof = false;
++    int real_sample_count;
++    if (input) {
++        real_sample_count = input_samples;
++        memcpy(data[0], input[0], input_samples * sstride);
++    } else {
++        real_sample_count = ao_read_data(ao, data, request_sample_count,
++            end_time_av - cur_time_av + cur_time_mp + time_delta, &eof, false, true);
++    }
+     if (real_sample_count == 0) {
+         if (eof) {
+             if (p->compressed_eac3 && !finish_spdif_eac3(ao))
+@@ -785,6 +794,7 @@
+     goto finish;
+
+ error:
++    succeeded = false;
+     ao_request_reload(ao);
+ finish:
+     if (pcm_ring_slot >= 0 && !block_buffer)
+@@ -793,6 +803,7 @@
+     if (data_owned && data[0]) CFAllocatorDeallocate(NULL, data[0]);
+     if (block_buffer) CFRelease(block_buffer);
+     if (sample_buffer) CFRelease(sample_buffer);
++    return succeeded;
+ }
+
+ static void start(struct ao *ao)
+@@ -814,8 +825,56 @@
+     log_renderer_state(ao, "start-requested");
+     [p->synchronizer setRate:1];
+     [p->renderer requestMediaDataWhenReadyOnQueue:p->queue usingBlock:^{
+-        feed(ao);
++        enqueue_audio(ao, NULL, 0);
+     }];
++}
++
++// AVFoundation is a non-real-time queue. PCM uses MPV's push contract so
++// decoder availability wakes the AO; renderer readiness must never drain a
++// pull device in a tight loop and manufacture an underrun on an empty decoder.
++static bool write_pcm(struct ao *ao, void **data, int samples)
++{
++    struct priv *p = ao->priv;
++    __block bool result = true;
++    dispatch_sync(p->queue, ^{
++        for (int offset = 0; offset < samples;) {
++            int count = MPMIN(ao->samplerate / 10, samples - offset);
++            void *block[] = {(char *)data[0] + offset * ao->sstride};
++            if (!enqueue_audio(ao, block, count)) {
++                result = false;
++                break;
++            }
++            offset += count;
++        }
++    });
++    return result;
++}
++
++static void get_state_pcm(struct ao *ao, struct mp_pcm_state *state)
++{
++    struct priv *p = ao->priv;
++    dispatch_sync(p->queue, ^{
++        int64_t now = CMTimeGetNanoseconds([p->synchronizer currentTime]);
++        struct av_pcm_queue_state queued = av_pcm_queue_state(
++            p->end_time_av, now, ao->samplerate, ao->device_buffer,
++            p->renderer.readyForMoreMediaData);
++        *state = (struct mp_pcm_state){
++            .free_samples = queued.free_samples,
++            .queued_samples = queued.queued_samples,
++            .delay = queued.delay,
++            .playing = queued.queued_samples > 0 && p->renderer.status != AVQueuedSampleBufferRenderingStatusFailed,
++        };
++    });
++}
++
++static void start_pcm(struct ao *ao)
++{
++    struct priv *p = ao->priv;
++    dispatch_sync(p->queue, ^{
++        // write precedes start in the push contract. Preserve those timestamps.
++        log_renderer_state(ao, "start-requested");
++        [p->synchronizer setRate:1];
++    });
+ }
+
+ static void stop(struct ao *ao)
+@@ -827,6 +886,9 @@
+         [p->renderer stopRequestingMediaData];
+         [p->renderer flush];
+         [p->synchronizer setRate:0];
++        p->end_time_av = -1;
++        p->enqueued_sample_count = 0;
++        p->last_progress_log_ns = 0;
+     });
+     if (p->compressed_eac3)
+         close_compressed_parser(p);
+@@ -1034,8 +1096,20 @@
+         }
+     }
+
+-    // AVSampleBufferAudioRenderer read ahead aggressively
++    // Match the existing two-second device capacity with explicit queue truth.
+     ao->device_buffer = ao->samplerate * 2;
++    p->end_time_av = -1;
++    if (!p->compressed_eac3) {
++        // Retain the compressed parser's EOF-aware pull delivery. PCM has no
++        // parser lookahead and uses MPV's queue-aware push lifecycle.
++        struct ao_driver *driver = talloc(ao, struct ao_driver);
++        *driver = *ao->driver;
++        driver->write = write_pcm;
++        driver->get_state = get_state_pcm;
++        driver->start = start_pcm;
++        ao->driver = driver;
++        MP_INFO(ao, "Apple PCM uses clock-bounded push delivery\n");
++    }
+
+     p->observer = [[AVObserver alloc] initWithAO:ao];
+     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+--- /dev/null
++++ b/audio/out/ao_avfoundation_pcm_queue.h
+@@ -0,0 +1,26 @@
++#ifndef MP_AVFOUNDATION_PCM_QUEUE_H
++#define MP_AVFOUNDATION_PCM_QUEUE_H
++#include <stdbool.h>
++#include <stdint.h>
++#include <math.h>
++struct av_pcm_queue_state {
++    int free_samples;
++    int queued_samples;
++    double delay;
++};
++// Queue occupancy belongs to the presentation clock, not to PCM block leases
++// or to readiness for more data. Whole periods keep refill work bounded.
++static inline struct av_pcm_queue_state av_pcm_queue_state(
++    int64_t end_ns, int64_t now_ns, int rate, int capacity, bool ready)
++{
++    int64_t ns = end_ns > now_ns ? end_ns - now_ns : 0;
++    int queued = (int)ceil(ns / 1e9 * rate);
++    int period = rate / 10;
++    int available = capacity > queued ? capacity - queued : 0;
++    return (struct av_pcm_queue_state){
++        .free_samples = ready && period > 0 ? available / period * period : 0,
++        .queued_samples = queued,
++        .delay = ns / 1e9,
++    };
++}
++#endif

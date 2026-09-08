@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "authorTag": "ai-2026-09-08-mpvkit-pcm-release",
+  "authors": [
+    {
+      "kind": "ai",
+      "name": "Codex",
+      "provider": "OpenAI",
+      "model": "GPT-6",
+      "modelVersion": "unknown",
+      "identityEvidence": "Session identifies GPT-6; exact snapshot unavailable."
+    }
+  ],
+  "baseCommit": "8adc8e38018612a3b3ad3248bd461b3042fc1531",
+  "summary": "Package renderer-clock-bounded PCM push delivery with full refill capacity. Add explicit libmpv-only rebuild mode for unchanged pinned dependencies. User authorized phone, computer and TV deployment.",
+  "artifacts": [
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0012-avfoundation-pcm-push-delivery.patch",
+      "sha256": "03d7548e4df61cdde2c15f39c098792ed9a649ec21320861ab3b7b6e1bafe207"
+    },
+    {
+      "path": "Sources/BuildScripts/XCFrameworkBuild/main.swift",
+      "sha256": "aa08185c978d86d8ba978ceaafad0ea24588d8bd75a5a8a5be7bd0f238ae2a4e"
+    }
+  ],
+  "validation": "Native causal regression fails before refill correction and passes after. Final PCM pause/resume/seek/EOF integration passes on iOS and tvOS simulators. Full package build follows this clean source commit; HomePod audible qualification remains pending."
+}
