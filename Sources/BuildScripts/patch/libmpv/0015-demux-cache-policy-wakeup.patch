@@ -1,0 +1,90 @@
+--- a/options/m_option.h
++++ b/options/m_option.h
+@@ -450,7 +450,8 @@
+ #define UPDATE_DEMUXER          (UINT64_C(1) << 18)  // invalidate --prefetch-playlist's data
+ #define UPDATE_AD               (UINT64_C(1) << 19)  // reinit audio chain and decoder
+ #define UPDATE_VD               (UINT64_C(1) << 20)  // reinit video chain and decoder
+-#define UPDATE_OPT_LAST         (UINT64_C(1) << 20)
++#define UPDATE_DEMUXER_CACHE    (UINT64_C(1) << 21)  // wake current demuxers after cache policy changes
++#define UPDATE_OPT_LAST         (UINT64_C(1) << 21)
+ 
+ // All bits between of UPDATE_ flags
+ #define UPDATE_OPTS_MASK        ((UPDATE_OPT_LAST << 1) - 1)
+--- a/demux/demux.c
++++ b/demux/demux.c
+@@ -90,6 +90,7 @@
+ static bool get_demux_sub_opts(int index, const struct m_sub_options **sub);
+ 
+ const struct m_sub_options demux_conf = {
++    .change_flags = UPDATE_DEMUXER_CACHE,
+     .opts = (const struct m_option[]){
+         {"cache", OPT_CHOICE(enable_cache,
+             {"no", 0}, {"auto", -1}, {"yes", 1})},
+@@ -1222,6 +1223,17 @@
+     mp_mutex_unlock(&in->lock);
+ }
+ 
++// Called by the player core after committing option changes. Wake under the
++// demux lock so a paused/full reader cannot miss the signal before sleeping.
++// Unlike starting prefetch, this does not change the reader's lifecycle.
++void demux_notify_options_changed(struct demuxer *demuxer)
++{
++    struct demux_internal *in = demuxer->in;
++    mp_mutex_lock(&in->lock);
++    mp_cond_signal(&in->wakeup);
++    mp_mutex_unlock(&in->lock);
++}
++
+ void demux_start_prefetch(struct demuxer *demuxer)
+ {
+     struct demux_internal *in = demuxer->in;
+@@ -2520,10 +2532,17 @@
+ static bool thread_work(struct demux_internal *in)
+ {
+     struct demux_opts *opts = in->d_user->opts;
++    double old_min_secs = in->min_secs;
+     size_t old_max_bytes = opts->max_bytes;
+     size_t old_max_bytes_bw = opts->max_bytes_bw;
+     if (m_config_cache_update(in->d_user->opts_cache)) {
+         update_opts(in->d_user);
++        // A full cache clears reading. Growing its allowance must re-arm
++        // prefetch as well as wake the thread; no decoder consumes packets
++        // while paused to otherwise re-arm it. read_packet still enforces
++        // cancellation, blocked readers, byte limits, and the new time limit.
++        if (!in->eof && (in->min_secs > old_min_secs || opts->max_bytes > old_max_bytes))
++            in->reading = true;
+         if (opts->max_bytes + opts->max_bytes_bw < old_max_bytes + old_max_bytes_bw)
+             demux_packet_pool_clear(in->packet_pool);
+     }
+--- a/demux/demux.h
++++ b/demux/demux.h
+@@ -317,6 +317,7 @@
+ void demux_stop_thread(struct demuxer *demuxer);
+ void demux_set_wakeup_cb(struct demuxer *demuxer, void (*cb)(void *ctx), void *ctx);
+ void demux_start_prefetch(struct demuxer *demuxer);
++void demux_notify_options_changed(struct demuxer *demuxer);
+ 
+ bool demux_cancel_test(struct demuxer *demuxer);
+ 
+--- a/player/command.c
++++ b/player/command.c
+@@ -8001,6 +8001,19 @@
+             mpctx->stop_play = PT_CURRENT_ENTRY;
+     }
+ 
++    if (flags & UPDATE_DEMUXER_CACHE) {
++        // The core owns these demuxers and runs after the configuration lock
++        // is released. Never acquire a demux lock from a config-cache callback:
++        // the reader updates its config cache while holding that same lock.
++        if (mpctx->demuxer)
++            demux_notify_options_changed(mpctx->demuxer);
++        for (int n = 0; n < mpctx->num_tracks; n++) {
++            struct track *track = mpctx->tracks[n];
++            if (track->selected && track->demuxer && track->demuxer != mpctx->demuxer)
++                demux_notify_options_changed(track->demuxer);
++        }
++    }
++
+     if (flags & UPDATE_DEMUXER)
+         mpctx->demuxer_changed = true;
+ 

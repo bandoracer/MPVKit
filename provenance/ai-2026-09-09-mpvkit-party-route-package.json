@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "authorTag": "ai-2026-09-09-mpvkit-party-route-package",
+  "authors": [
+    {
+      "kind": "ai",
+      "name": "Codex",
+      "provider": "OpenAI",
+      "model": "GPT-6",
+      "modelVersion": "unknown",
+      "identityEvidence": "Session identifies GPT-6; exact snapshot unavailable."
+    }
+  ],
+  "baseCommit": "6679a540b833acbdb2c5e7754518b27ca1b81596",
+  "summary": "Package MPV core-owned renderer notification reload and paused demux cache-demand restoration. All other dependency URLs and checksums remain unchanged.",
+  "artifacts": [
+    {
+      "path": "Package.swift",
+      "sha256": "e1527c1bb0945961b0b1a65aa451369dfbdff00f5684d5402e518f06a72b7b88"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0014-avfoundation-route-reload.patch",
+      "sha256": "50d0c366bd644604f044150a02dd341c87f7f19357f3a48d81e4dadee0b0e639"
+    },
+    {
+      "path": "Sources/BuildScripts/patch/libmpv/0015-demux-cache-policy-wakeup.patch",
+      "sha256": "6b9b6cb0653612dd97fbc2e0b32fdf8bbf1ad6c45a82c971ad4d2c7366bd038f"
+    },
+    {
+      "path": "Libmpv.xcframework.zip",
+      "sha256": "cee26674e514d0d9ad9033d4ad5617e8eee4ffa62bd19fd7d07054fada7d9951"
+    }
+  ],
+  "validation": "Clean libmpv build completed for all nine Apple architecture slices. Real libmpv regression reproduced the legacy ao_read_data_locked assertion, then passed renderer replacement, paused video clock preservation and resumed advancement. Paused forward-cache expansion from 6 to 12 seconds failed before the demux wake and prefetch rearm patch and passed afterward. Nine targeted Marquee tests passed; no physical Bluetooth route or device release qualification is implied."
+}

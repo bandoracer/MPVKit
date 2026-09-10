@@ -1,0 +1,36 @@
+--- a/audio/out/ao_avfoundation.m
++++ b/audio/out/ao_avfoundation.m
+@@ -940,7 +940,6 @@
+     return self;
+ }
+ - (void)handleRestartNotification:(NSNotification*)notification {
+-    struct priv *p = ao->priv;
+     if ([notification.name isEqualToString:
+             AVSampleBufferAudioRendererWasFlushedAutomaticallyNotification])
+     {
+@@ -956,18 +955,13 @@
+         MP_WARN(ao, "apple-renderer-output-configuration-change\n");
+         log_renderer_state(ao, "output-configuration-change");
+     }
+-    if (p->host_managed_audio_session) {
+-        // The embedding application owns the process-wide AVAudioSession and
+-        // route generation. Ask mpv's player core to recreate the AO at its
+-        // normal synchronized boundary; directly flushing and restarting this
+-        // renderer leaves the audio clock detached from the video timeline.
+-        MP_WARN(ao, "apple-renderer-reload-requested owner=host\n");
+-        ao_request_reload(ao);
+-        return;
+-    }
+-    MP_WARN(ao, "restarting due to system notification; this will cause desync\n");
+-    stop(ao);
+-    start(ao);
++    // AVAudioSession ownership and AO lifecycle are separate contracts.
++    // Every route/flush notification is an observation: only the MPV core
++    // may recreate the output and restore transport at its synchronized
++    // boundary. Direct stop/start also invokes the pull callback on PCM's
++    // push driver, violating ao_read_data's driver contract.
++    MP_WARN(ao, "apple-renderer-reload-requested owner=mpv-core\n");
++    ao_request_reload(ao);
+ }
+ - (void)handleRateChangeNotification:(NSNotification*)notification {
+     (void)notification;
